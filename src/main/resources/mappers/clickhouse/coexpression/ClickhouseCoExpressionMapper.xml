@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="org.cbioportal.infrastructure.repository.clickhouse.coexpression.ClickhouseCoExpressionMapper">
+
+    <resultMap id="coExpressionResultMap" type="org.cbioportal.infrastructure.repository.clickhouse.coexpression.CoExpressionResult">
+        <result property="entrezGeneId" column="entrezGeneId"/>
+        <result property="spearmansCorrelation" column="spearmansCorrelation"/>
+        <result property="numSamples" column="numSamples"/>
+    </resultMap>
+
+    <select id="getCoExpressions" resultMap="coExpressionResultMap">
+        <!--
+            Single-scan rewrite. The previous version scanned genetic_alteration_derived for
+            profile B three times: once to build the non_constant_genes CTE, once for the
+            valid-correlation branch, and once more for the NULL-correlation branch of the
+            UNION ALL. Here we compute all per-gene aggregates (sample count, distinct-value
+            cardinality, and the Spearman correlation) in ONE grouped pass, then classify each
+            gene in a cheap outer query. The validity/threshold rules are unchanged.
+        -->
+        WITH ref_values AS (
+            SELECT sample_unique_id, toFloat64OrNull(alteration_value) AS ref_val
+            FROM genetic_alteration_derived
+            WHERE cancer_study_identifier = #{cancerStudyIdentifierA}
+              AND profile_type = #{profileTypeA}
+              AND hugo_gene_symbol = #{hugoGeneSymbol}
+              AND alteration_value != '' AND alteration_value != 'NA'
+              AND toFloat64OrNull(alteration_value) IS NOT NULL
+              <if test="sampleUniqueIds != null and sampleUniqueIds.length > 0">
+                  AND sample_unique_id IN (#{sampleUniqueIds, typeHandler=org.apache.ibatis.type.ArrayTypeHandler})
+              </if>
+        ),
+        per_gene AS (
+            -- The single scan of profile B. We collect each gene's paired (ref, value)
+            -- vectors with groupArray so the correlation can be computed afterwards, and
+            -- compute the cheap classification aggregates (count / distinct cardinality)
+            -- in the same pass. The element order is not guaranteed without ORDER BY, but
+            -- correlation is computed over the paired values collected for each sample.
+            SELECT
+                g.entrez_gene_id AS entrezGeneId,
+                count(*) AS numSamples,
+                uniqExact(toFloat64OrNull(d.alteration_value)) AS exactDistinct,
+                uniq(toFloat64OrNull(d.alteration_value)) AS approxDistinct,
+                groupArray(r.ref_val) AS refValues,
+                groupArray(toFloat64OrNull(d.alteration_value)) AS geneValues
+            FROM genetic_alteration_derived d
+            INNER JOIN ref_values r ON d.sample_unique_id = r.sample_unique_id
+            INNER JOIN gene g ON d.hugo_gene_symbol = g.hugo_gene_symbol
+            WHERE d.cancer_study_identifier = #{cancerStudyIdentifierB}
+              AND d.profile_type = #{profileTypeB}
+              AND d.hugo_gene_symbol != #{hugoGeneSymbol}
+              AND d.alteration_value != '' AND d.alteration_value != 'NA'
+              AND toFloat64OrNull(d.alteration_value) IS NOT NULL
+            GROUP BY g.entrez_gene_id
+        ),
+        scored AS (
+            SELECT
+                entrezGeneId,
+                numSamples,
+                -- A "valid" gene is non-constant (exactDistinct > 1), has enough samples
+                -- (numSamples >= 3) and enough spread (approxDistinct > numSamples / 2).
+                (numSamples >= 3 AND exactDistinct > 1 AND approxDistinct > numSamples / 2)
+                    AS validNumeric,
+                -- rankCorr aborts the whole query if handed a constant vector, so constant
+                -- genes (exactDistinct = 1) are fed a throwaway 2-point vector; their result
+                -- is discarded by the validNumeric gate below. This mirrors the original
+                -- query, which never called rankCorr on a constant gene.
+                arrayReduce(
+                    'rankCorr',
+                    if(exactDistinct > 1, refValues, [0., 1.]),
+                    if(exactDistinct > 1, geneValues, [0., 1.])) AS corr
+            FROM per_gene
+        )
+        SELECT
+            entrezGeneId,
+            if(validNumeric AND isFinite(corr), corr, NULL) AS spearmansCorrelation,
+            numSamples
+        FROM scored
+        WHERE
+            -- valid gene that also clears the correlation threshold ...
+            (validNumeric AND isFinite(corr) AND abs(corr) >= #{threshold})
+            -- ... or a gene in the NULL bucket (too few samples / constant / low spread).
+            OR (NOT validNumeric)
+        <!-- Intentionally set to 2GB to trigger early external GROUP BY spilling; tune per environment if needed -->
+        SETTINGS max_bytes_before_external_group_by = 2000000000
+    </select>
+
+</mapper>
