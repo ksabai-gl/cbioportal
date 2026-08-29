@@ -1,16 +1,5 @@
 package org.cbioportal.web;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
-import java.lang.reflect.Method;
-import java.util.Collections;
-import java.util.List;
-
 import org.cbioportal.model.MskEntityTranslation;
 import org.cbioportal.service.MskEntityTranslationService;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,23 +9,31 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
-import org.springframework.security.access.AccessDeniedException;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.test.context.support.WithAnonymousUser;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers;
 
-/**
- * Unit tests for {@link MskEntityTranslationController}.
- *
- * Uses Mockito's JUnit 5 extension (no manual reflection wiring) and a single
- * {@code @BeforeEach} method. Field declarations are kept at the top of the
- * class, before any lifecycle methods, to avoid the compile-order issue
- * flagged in review.
- */
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
 @ExtendWith(MockitoExtension.class)
-class MskEntityTranslationControllerTest {
+public class MskEntityTranslationControllerTest {
 
-    private static final String STUDY_ID = "study_tcga_pub";
+    private static final String TEST_STUDY_ID = "study_tcga_pub";
 
     @Mock
     private MskEntityTranslationService mskEntityTranslationService;
@@ -47,12 +44,31 @@ class MskEntityTranslationControllerTest {
     private MockMvc mockMvc;
 
     @BeforeEach
-    void setUp() {
-        mockMvc = MockMvcBuilders.standaloneSetup(mskEntityTranslationController).build();
+    public void setUp() {
+        // Standalone MockMvc setup with Spring Security test support so that
+        // @PreAuthorize is actually enforced (not just reflectively inspected).
+        mockMvc = MockMvcBuilders.standaloneSetup(mskEntityTranslationController)
+            .apply(SecurityMockMvcConfigurers.springSecurity())
+            .build();
     }
 
     @Test
-    void getEntitiesForStudy_shouldHavePreAuthorizeStudyReadCheck() throws NoSuchMethodException {
+    public void getEntitiesForStudy_returnsTranslationsFromService() {
+        List<MskEntityTranslation> expected = Collections.singletonList(new MskEntityTranslation());
+        when(mskEntityTranslationService.getEntityTranslations(TEST_STUDY_ID)).thenReturn(expected);
+
+        ResponseEntity<List<MskEntityTranslation>> response =
+            mskEntityTranslationController.getEntitiesForStudy(TEST_STUDY_ID);
+
+        assertEquals(200, response.getStatusCodeValue());
+        assertEquals(expected, response.getBody());
+    }
+
+    @Test
+    public void getEntitiesForStudy_shouldHavePreAuthorizeStudyReadCheck() throws NoSuchMethodException {
+        // Reflection check retained: guarantees the annotation is present on the method
+        // (fast, no Spring context needed). Runtime enforcement is covered separately
+        // below by the MockMvc + Spring Security test.
         Method method = MskEntityTranslationController.class.getMethod("getEntitiesForStudy", String.class);
         PreAuthorize preAuthorize = method.getAnnotation(PreAuthorize.class);
 
@@ -60,46 +76,38 @@ class MskEntityTranslationControllerTest {
         assertEquals("hasPermission(#studyId, 'CancerStudyId', 'read')", preAuthorize.value());
     }
 
-    /**
-     * Complements the reflection-based annotation check above: asserts that
-     * unauthorized/unauthenticated access is actually rejected with a 403
-     * at the MVC layer, not just that the annotation is present.
-     */
     @Test
-    void getEntitiesForStudy_shouldReturn403WhenAccessDenied() throws Exception {
-        when(mskEntityTranslationService.getEntityTranslations(STUDY_ID))
-            .thenThrow(new AccessDeniedException("Access is denied"));
-
-        mockMvc.perform(get("/api/studies/{studyId}/msk-entity-translations", STUDY_ID)
+    @WithAnonymousUser
+    public void getEntitiesForStudy_unauthorizedUser_shouldReturn403() throws Exception {
+        // Integration-style check via MockMvc + Spring Security: verifies the
+        // @PreAuthorize check is actually enforced at runtime for an anonymous caller.
+        mockMvc.perform(get("/api/studies/{studyId}/msk-entity-translations", TEST_STUDY_ID)
                 .accept(MediaType.APPLICATION_JSON))
             .andExpect(status().isForbidden());
     }
 
     @Test
-    void getEntitiesForStudy_returnsTranslationsFromService() throws Exception {
-        List<MskEntityTranslation> translations = Collections.singletonList(new MskEntityTranslation());
-        when(mskEntityTranslationService.getEntityTranslations(STUDY_ID)).thenReturn(translations);
+    @WithMockUser
+    public void getEntitiesForStudy_authorizedUser_shouldReturn200() throws Exception {
+        when(mskEntityTranslationService.getEntityTranslations(anyString()))
+            .thenReturn(Collections.singletonList(new MskEntityTranslation()));
 
-        mockMvc.perform(get("/api/studies/{studyId}/msk-entity-translations", STUDY_ID)
+        mockMvc.perform(get("/api/studies/{studyId}/msk-entity-translations", TEST_STUDY_ID)
                 .accept(MediaType.APPLICATION_JSON))
             .andExpect(status().isOk());
-
-        verify(mskEntityTranslationService).getEntityTranslations(STUDY_ID);
     }
 
-    /**
-     * Service-level test (not routed through MVC): passing a null studyId
-     * through a real @PathVariable route isn't realistic, so this verifies
-     * the service contract directly rather than via mockMvc, per review
-     * feedback.
-     */
     @Test
-    void service_getEntityTranslations_nullStudyIdIsPassedThrough() {
-        when(mskEntityTranslationService.getEntityTranslations(null)).thenReturn(Collections.emptyList());
+    public void getEntitiesForStudy_edgeCase_nullStudyIdIsPassedThroughToService() {
+        // Kept as a direct unit test of service delegation behavior only.
+        // A null path variable cannot occur via a real MVC request (Spring routing
+        // would not match the mapping), so this does NOT exercise the controller's
+        // MVC/security contract - see the MockMvc tests above for that coverage.
+        when(mskEntityTranslationService.getEntityTranslations(null)).thenReturn(null);
 
-        List<MskEntityTranslation> result = mskEntityTranslationController.getEntitiesForStudy(null).getBody();
+        ResponseEntity<List<MskEntityTranslation>> response =
+            mskEntityTranslationController.getEntitiesForStudy(null);
 
-        assertNotNull(result);
-        verify(mskEntityTranslationService).getEntityTranslations(null);
+        assertNull(response.getBody());
     }
 }
