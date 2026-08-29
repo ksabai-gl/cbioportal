@@ -1,13 +1,13 @@
 package org.cbioportal.web;
 
+
+import static org.mockito.Mockito.mock;
 import org.cbioportal.model.MskEntityTranslation;
 import org.cbioportal.service.MskEntityTranslationService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -17,7 +17,6 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers;
 
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
@@ -30,12 +29,9 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@ExtendWith(MockitoExtension.class)
 public class MskEntityTranslationControllerTest {
 
     private static final String TEST_STUDY_ID = "study_tcga_pub";
-
-    @Mock
     private MskEntityTranslationService mskEntityTranslationService;
 
     @InjectMocks
@@ -45,8 +41,9 @@ public class MskEntityTranslationControllerTest {
 
     @BeforeEach
     public void setUp() {
-        // Standalone MockMvc setup with Spring Security test support so that
-        // @PreAuthorize is actually enforced (not just reflectively inspected).
+        mskEntityTranslationService = mock(MskEntityTranslationService.class);
+        // Single @BeforeEach; standalone MockMvc setup with Spring Security test support
+        // so @PreAuthorize is actually enforced at runtime (not just reflectively inspected).
         mockMvc = MockMvcBuilders.standaloneSetup(mskEntityTranslationController)
             .apply(SecurityMockMvcConfigurers.springSecurity())
             .build();
@@ -60,6 +57,7 @@ public class MskEntityTranslationControllerTest {
         ResponseEntity<List<MskEntityTranslation>> response =
             mskEntityTranslationController.getEntitiesForStudy(TEST_STUDY_ID);
 
+        // Validates ResponseEntity.ok(...) usage (200 + body) per review comment 3886194180
         assertEquals(200, response.getStatusCodeValue());
         assertEquals(expected, response.getBody());
     }
